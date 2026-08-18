@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"net/http"
@@ -30,6 +32,9 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+const registrationFormURL = "https://docs.google.com/forms/d/e/1FAIpQLScMmHtR0G6op2Rq3-w6qFpt-EimJ9Owz14nwOqBDoOfgcfmRA/viewform"
+const registrationSheetCSVURL = "https://docs.google.com/spreadsheets/d/1nzfQvGLL65eGI--kMbfYtoQ9Pu1ulSdyhGRmx7UA8iw/edit?resourcekey=&gid=585141890#gid=585141890"
 
 // Message represents a chat message for our client
 type Message struct {
@@ -371,6 +376,140 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
+func phoneNumberFromJID(jid types.JID) string {
+	if jid.User == "" || jid.Server != types.DefaultUserServer {
+		return ""
+	}
+	return jid.User
+}
+func resolveSenderPhoneNumber(client *whatsmeow.Client, msg *events.Message, logger waLog.Logger) string {
+	logger.Infof("[resolveSenderPhoneNumber] start: Sender=%s SenderAlt=%s Chat=%s",
+		msg.Info.Sender, msg.Info.SenderAlt, msg.Info.Chat)
+
+	if number := phoneNumberFromJID(msg.Info.SenderAlt); number != "" {
+		logger.Infof("[resolveSenderPhoneNumber] resolved from SenderAlt: %s", number)
+		return number
+	}
+	if number := phoneNumberFromJID(msg.Info.Sender); number != "" {
+		logger.Infof("[resolveSenderPhoneNumber] resolved from Sender: %s", number)
+		return number
+	}
+
+	lidCandidates := []types.JID{msg.Info.Sender, msg.Info.SenderAlt}
+	if client != nil && client.Store != nil && client.Store.LIDs != nil {
+		for _, jid := range lidCandidates {
+			if jid.User == "" || jid.Server != types.HiddenUserServer {
+				continue
+			}
+
+			pn, err := client.Store.LIDs.GetPNForLID(context.Background(), jid.ToNonAD())
+			if err != nil {
+				logger.Warnf("[resolveSenderPhoneNumber] LID store lookup failed for %s: %v", jid, err)
+				continue
+			}
+			if number := phoneNumberFromJID(pn); number != "" {
+				logger.Infof("[resolveSenderPhoneNumber] resolved from LID store (%s -> %s): %s", jid, pn, number)
+				return number
+			}
+		}
+	}
+
+	if client != nil && msg.Info.Chat.Server == types.GroupServer {
+		logger.Infof("[resolveSenderPhoneNumber] LID store miss, falling back to live group info fetch for %s", msg.Info.Chat)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		groupInfo, err := client.GetGroupInfo(ctx, msg.Info.Chat)
+		if err != nil {
+			logger.Warnf("[resolveSenderPhoneNumber] GetGroupInfo failed for %s: %v", msg.Info.Chat, err)
+		} else {
+			for _, participant := range groupInfo.Participants {
+				for _, jid := range lidCandidates {
+					if jid.User == "" || jid.Server != types.HiddenUserServer {
+						continue
+					}
+					if participant.LID.ToNonAD() != jid.ToNonAD() {
+						continue
+					}
+					if number := phoneNumberFromJID(participant.PhoneNumber); number != "" {
+						logger.Infof("[resolveSenderPhoneNumber] resolved from group participant.PhoneNumber: %s", number)
+						return number
+					}
+					if number := phoneNumberFromJID(participant.JID); number != "" {
+						logger.Infof("[resolveSenderPhoneNumber] resolved from group participant.JID: %s", number)
+						return number
+					}
+				}
+			}
+		}
+	}
+
+	if msg.Info.Sender.User != "" {
+		return msg.Info.Sender.User // all lookups failed, falling back to raw Sender.User (likely LID)
+	}
+	return msg.Info.Chat.User // all lookups failed, falling back to raw Chat.User
+}
+
+func normalizePhoneNumber(value string) string {
+	var digits strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	return digits.String()
+}
+func cellHasPhoneNumber(cell string, phoneNumber string) bool {
+	cellNumber := normalizePhoneNumber(cell)
+	if cellNumber == "" {
+		return false
+	}
+
+	return cellNumber == phoneNumber ||
+		strings.HasSuffix(cellNumber, phoneNumber) ||
+		strings.HasSuffix(phoneNumber, cellNumber)
+}
+func isPhoneNumberInRegistrationSheet(phoneNumber string, logger waLog.Logger) (bool, error) {
+	phoneNumber = normalizePhoneNumber(phoneNumber)
+
+	resp, err := http.Get(registrationSheetCSVURL)
+	if err != nil {
+		logger.Warnf("[isPhoneNumberInRegistrationSheet] failed to fetch sheet: %v", err)
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Warnf("[isPhoneNumberInRegistrationSheet] sheet returned non-200 status: %s", resp.Status)
+		return false, fmt.Errorf("sheet returned status %s", resp.Status)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Warnf("[isPhoneNumberInRegistrationSheet] failed to read response body: %v", err)
+		return false, err
+	}
+
+	reader := csv.NewReader(bytes.NewReader(bodyBytes))
+	reader.FieldsPerRecord = -1
+
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+
+		for _, cell := range record {
+			if cellHasPhoneNumber(cell, phoneNumber) {
+				return true, nil // match found - send form url
+			}
+		}
+	}
+}
+
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
@@ -413,6 +552,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
+	senderNumber := resolveSenderPhoneNumber(client, msg, logger)
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
 	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
@@ -425,6 +565,15 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Extract text content
 	content := extractTextContent(msg.Message)
+	if !msg.Info.IsFromMe && strings.Contains(strings.ToLower(content), "i want to register") {
+		registered, err := isPhoneNumberInRegistrationSheet(senderNumber, logger)
+		if err != nil {
+			logger.Warnf("Failed to check registration sheet for %s: %v", senderNumber, err)
+		} else if registered {
+			logger.Infof("Number %s is registered, sending registration form", senderNumber)
+			sendWhatsAppMessage(client, msg.Info.Chat.String(), registrationFormURL, "")
+		}
+	}
 
 	// Extract media info
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
@@ -463,10 +612,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 		// Log based on message type
 		if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
+			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, senderNumber, mediaType, filename, content)
 		} else if content != "" {
-			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
+			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, senderNumber, content)
 		}
+		fmt.Println("----------------------------------------------------------------------------------------------------------------")
 	}
 }
 
