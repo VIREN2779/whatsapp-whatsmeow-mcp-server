@@ -625,8 +625,23 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		} else if content != "" {
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, senderNumber, content)
 		}
-		fmt.Println("----------------------------------------------------------------------------------------------------------------")
 	}
+
+	// Auto-download any incoming media, from both DMs and groups
+	if mediaType != "" && !msg.Info.IsFromMe {
+		go func(msgID, chatJID string) {
+			ok, mType, fname, path, dlErr := downloadMedia(client, messageStore, msgID, chatJID)
+			if dlErr != nil {
+				logger.Warnf("Auto-download failed for message %s in %s: %v", msgID, chatJID, dlErr)
+				return
+			}
+			if ok {
+				logger.Infof("Auto-downloaded %s media (%s) for message %s -> %s", mType, fname, msgID, path)
+			}
+		}(msg.Info.ID, chatJID)
+	}
+
+	fmt.Println("----------------------------------------------------------------------------------------------------------------")
 }
 
 // DownloadMediaRequest represents the request body for the download media API
