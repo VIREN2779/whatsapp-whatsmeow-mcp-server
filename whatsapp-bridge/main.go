@@ -34,7 +34,7 @@ import (
 )
 
 const registrationFormURL = "https://docs.google.com/forms/d/e/1FAIpQLScMmHtR0G6op2Rq3-w6qFpt-EimJ9Owz14nwOqBDoOfgcfmRA/viewform"
-const registrationSheetCSVURL = "https://docs.google.com/spreadsheets/d/1nzfQvGLL65eGI--kMbfYtoQ9Pu1ulSdyhGRmx7UA8iw/edit?resourcekey=&gid=585141890#gid=585141890"
+const registrationSheetCSVURL = "https://docs.google.com/spreadsheets/d/1nzfQvGLL65eGI--kMbfYtoQ9Pu1ulSdyhGRmx7UA8iw/export?format=csv&gid=585141890"
 
 // Message represents a chat message for our client
 type Message struct {
