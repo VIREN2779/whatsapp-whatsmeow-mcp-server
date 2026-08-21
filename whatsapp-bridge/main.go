@@ -573,7 +573,9 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Extract text content
 	content := extractTextContent(msg.Message)
-	if !msg.Info.IsFromMe && strings.Contains(strings.ToLower(content), "i want to register") {
+	if !msg.Info.IsFromMe &&
+		time.Since(msg.Info.Timestamp) < time.Minute && // skip registration form trigger for old messages
+		strings.Contains(strings.ToLower(content), "i want to register") {
 		registered, err := isPhoneNumberInRegistrationSheet(senderNumber, logger)
 		if err != nil {
 			logger.Warnf("Failed to check registration sheet for %s: %v", senderNumber, err)
