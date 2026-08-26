@@ -1,4 +1,4 @@
-// dashboard create simple show 
+// dashboard create simple show
 
 // image/pdf only show
 // [Name][mobile] - button [approved] [reject]
@@ -10,3 +10,6 @@
 // if reject file remove
 
 // group by mobile search in "/" route 
+
+// message always be a unread in whatsapp
+// image save in whatsmeow part using - phone number not Jid
