@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Media Queue</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0b0d12;
+            --surface: #12151d;
+            --surface-2: #171b25;
+            --border: #242a38;
+            --text: #e7e9ee;
+            --muted: #838da3;
+            --faint: #4d5568;
+            --accent: #7c9eff;
+            --accent-dim: rgba(124, 158, 255, 0.12);
+            --approve: #34d399;
+            --approve-dim: rgba(52, 211, 153, 0.1);
+            --reject: #fb7185;
+            --reject-dim: rgba(251, 113, 133, 0.1);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            background-image:
+                radial-gradient(ellipse 900px 500px at 15% -10%, rgba(124, 158, 255, 0.07), transparent),
+                radial-gradient(ellipse 700px 400px at 100% 0%, rgba(52, 211, 153, 0.04), transparent);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            padding: 48px 32px 80px;
+            min-height: 100vh;
+        }
+
+        .wrap {
+            max-width: 880px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            margin-bottom: 36px;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .eyebrow {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--faint);
+            margin: 0 0 8px;
+        }
+
+        h1 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 30px;
+            font-weight: 700;
+            margin: 0;
+            letter-spacing: -0.01em;
+        }
+
+        .stats {
+            display: flex;
+            gap: 22px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .stats b {
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .approved-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 32px;
+            transition: gap 0.15s ease;
+        }
+
+        .approved-link:hover {
+            gap: 10px;
+        }
+
+        .group {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            margin-bottom: 18px;
+            overflow: hidden;
+            opacity: 0;
+            transform: translateY(8px);
+            animation: rise 0.4s ease forwards;
+        }
+
+        .group:nth-child(1) {
+            animation-delay: 0.02s;
+        }
+
+        .group:nth-child(2) {
+            animation-delay: 0.06s;
+        }
+
+        .group:nth-child(3) {
+            animation-delay: 0.10s;
+        }
+
+        .group:nth-child(4) {
+            animation-delay: 0.14s;
+        }
+
+        .group:nth-child(5) {
+            animation-delay: 0.18s;
+        }
+
+        @keyframes rise {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .group-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 20px;
+            background: var(--surface-2);
+            border-bottom: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+        }
+
+        .group.unlinked .group-head {
+            border-left-color: var(--faint);
+        }
+
+        .group-number {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .group-number .num {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14.5px;
+            font-weight: 500;
+            letter-spacing: 0.01em;
+        }
+
+        .group.unlinked .num {
+            color: var(--muted);
+            font-style: italic;
+        }
+
+        .badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--muted);
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 2px 9px;
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 13px 20px;
+            border-top: 1px solid var(--border);
+            transition: background 0.15s ease;
+        }
+
+        .row:hover {
+            background: var(--surface-2);
+        }
+
+        .fname {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: var(--text);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding-right: 16px;
+        }
+
+        .actions {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        button {
+            font-family: 'Inter', sans-serif;
+            font-size: 12.5px;
+            font-weight: 600;
+            padding: 7px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: transform 0.1s ease, filter 0.15s ease;
+        }
+
+        button:hover {
+            filter: brightness(1.15);
+        }
+
+        button:active {
+            transform: scale(0.95);
+        }
+
+        button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+
+        .approve {
+            background: var(--approve-dim);
+            border-color: rgba(52, 211, 153, 0.35);
+            color: var(--approve);
+        }
+
+        .reject {
+            background: var(--reject-dim);
+            border-color: rgba(251, 113, 133, 0.35);
+            color: var(--reject);
+        }
+
+        .empty {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        @media (max-width: 560px) {
+            body {
+                padding: 32px 16px 60px;
+            }
+
+            .fname {
+                font-size: 12px;
+            }
+
+            .row {
+                padding: 12px 14px;
+            }
+
+            .group-head {
+                padding: 12px 14px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .group {
+                animation: none;
+                opacity: 1;
+                transform: none;
+            }
+
+            button {
+                transition: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+        <header>
+            <div>
+                <h1>Media</h1>
+            </div>
+            <div class="stats" id="stats"></div>
+        </header>
+        <div id="wa-banner" style="display:none;margin:16px 0;padding:14px;border:1px solid #eee;border-radius:8px;">
+            <div>WhatsApp disconnected.</div>
+            <button onclick="startLogin()"
+                style="margin-top:8px;margin-bottom:10px;padding:6px 14px;cursor:pointer;">Login with
+                WhatsApp</button>
+            <div id="wa-qr"></div>
+        </div>
+        <a class="approved-link" href="/approved.html">View approved →</a>
+        <div id="groups"></div>
+    </div>
+
+    <script>
+        async function load() {
+            const res = await fetch('/api/all-media');
+            const rows = await res.json();
+            renderStats(rows);
+            renderGroups(rows);
+        }
+
+        function renderStats(rows) {
+            const numbers = new Set(rows.filter(r => r.phone_number && r.phone_number !== 'null').map(r => r.phone_number));
+            document.getElementById('stats').innerHTML =
+                `<span><b>${rows.length}</b> pending</span><span><b>${numbers.size}</b> numbers</span>`;
+        }
+
+        function renderGroups(rows) {
+            const container = document.getElementById('groups');
+            container.innerHTML = '';
+
+            if (!rows.length) {
+                container.innerHTML = '<div class="empty">Queue is empty — nothing waiting on review.</div>';
+                return;
+            }
+
+            const groups = new Map();
+            rows.forEach(row => {
+                const key = row.phone_number && row.phone_number !== 'null' ? row.phone_number : '__unlinked__';
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(row);
+            });
+
+            // rows arrives sorted timestamp DESC, so items[0] in each group is that
+            // group's newest message — sort groups by that so fresh numbers rise to top
+            const latestTs = items => new Date(items[0].timestamp).getTime();
+
+            const ordered = [...groups.entries()].sort((a, b) => {
+                if (a[0] === '__unlinked__') return 1;
+                if (b[0] === '__unlinked__') return -1;
+                return latestTs(b[1]) - latestTs(a[1]);
+            });
+
+            ordered.forEach(([key, items]) => {
+                const isUnlinked = key === '__unlinked__';
+                const group = document.createElement('div');
+                group.className = 'group' + (isUnlinked ? ' unlinked' : '');
+                group.innerHTML = `
+                    <div class="group-head">
+                        <div class="group-number">
+                            <span class="num">${isUnlinked ? 'No number linked' : key}</span>
+                        </div>
+                        <span class="badge">${items.length}</span>
+                    </div>
+                    ${items.map(row => `
+                        <div class="row">
+                            <span class="fname">${row.filename}</span>
+                            <span class="actions">
+                                <button class="approve" onclick="act('${row.id}','approve')">Approve</button>
+                                <button class="reject" onclick="act('${row.id}','reject')">Reject</button>
+                            </span>
+                        </div>
+                    `).join('')}
+                `;
+                container.appendChild(group);
+            });
+        }
+
+        async function checkWaStatus() {
+            const d = await (await fetch('/api/status')).json();
+            document.getElementById('wa-banner').style.display = d.connected ? 'none' : 'block';
+        }
+        async function startLogin() {
+            await fetch('/api/login', { method: 'POST' });
+            const box = document.getElementById('wa-qr');
+            const iv = setInterval(async () => {
+                const s = await (await fetch('/api/status')).json();
+                if (s.connected) { clearInterval(iv); box.innerHTML = ''; checkWaStatus(); return; }
+                const q = await (await fetch('/api/qr')).json();
+                if (q.qr) box.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(q.qr)}">`;
+            }, 3000);
+        }
+        checkWaStatus();
+        setInterval(checkWaStatus, 10000);
+
+        async function act(id, action) {
+            await fetch(`/api/${action}?id=${encodeURIComponent(id)}`, { method: 'POST' });
+            load();
+        }
+
+        load();
+    </script>
+</body>
+
+</html>
