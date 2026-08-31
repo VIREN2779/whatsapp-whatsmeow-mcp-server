@@ -1,0 +1,12 @@
+{
+    "name": "dashboard",
+    "version": "1.0.0",
+    "type": "module",
+    "scripts": {
+        "start": "node --experimental-sqlite server.js"
+    },
+    "dependencies": {
+        "@hono/node-server": "^1.13.0",
+        "hono": "^4.6.0"
+    }
+}
