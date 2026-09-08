@@ -124,6 +124,22 @@
             width: 100%;
         }
 
+        .rename-add-row {
+            display: flex;
+            flex-direction: row;
+            gap: 8px;
+            margin-top: 6px;
+            flex-wrap: wrap;
+        }
+
+        .rename-add-row button {
+            font-size: 12px;
+            padding: 6px 10px;
+            background: var(--accent-dim);
+            border-color: rgba(124, 158, 255, 0.35);
+            color: var(--accent);
+        }
+
         .empty {
             text-align: center;
             padding: 60px 20px;
@@ -142,11 +158,13 @@
     </div>
 
     <script>
+        let namesCache = [];
+
         async function loadNamesDatalist() {
             const res = await fetch('/api/names');
-            const names = await res.json();
+            namesCache = await res.json();
             document.getElementById('names-list').innerHTML =
-                names.map(n => `<option value="${escapeHtml(n)}">`).join('');
+                namesCache.map(n => `<option value="${escapeHtml(n)}">`).join('');
         }
 
         function escapeHtml(str) {
@@ -190,26 +208,73 @@
                     <td class="name" data-cell="name">${escapeHtml(r.name)}</td>
                     <td><button data-role="change">Change name</button></td>
                 `;
-                tr.querySelector('[data-role="change"]').addEventListener('click', () => startRename(tr, r));
+                // .onclick (not addEventListener) so startRename's later reassignment
+                // fully replaces this handler instead of both firing on the same click
+                tr.querySelector('[data-role="change"]').onclick = () => startRename(tr, r);
                 tbody.appendChild(tr);
             });
         }
 
         function startRename(tr, r) {
             const nameCell = tr.querySelector('[data-cell="name"]');
-            nameCell.innerHTML = `<input class="rename-input" list="names-list" value="${escapeHtml(r.name)}">`;
+            nameCell.innerHTML = `
+                <input class="rename-input" list="names-list" value="${escapeHtml(r.name)}">
+                <div class="rename-add-row"></div>
+            `;
             const changeBtn = tr.querySelector('[data-role="change"]');
             const input = nameCell.querySelector('input');
+            const addRow = nameCell.querySelector('.rename-add-row');
             input.focus();
             changeBtn.textContent = 'Save';
-            changeBtn.onclick = async () => {
-                const newName = input.value.trim();
-                if (!newName) return;
+
+            async function saveName(newName) {
                 await fetch(`/api/rules/rename?phone_number=${encodeURIComponent(r.phone_number)}&name=${encodeURIComponent(newName)}`, { method: 'POST' });
                 load();
+            }
+
+            function renderPrefixChoice() {
+                const q = input.value.trim();
+                const qLower = q.toLowerCase();
+                addRow.innerHTML = '';
+
+                const exactMatch = namesCache.some(n => n.toLowerCase() === qLower);
+                const hasPrefix = /^(client|lead)\//i.test(q);
+
+                if (!q || exactMatch || hasPrefix) {
+                    // Empty, matches an existing rule name exactly, or already
+                    // correctly formatted — normal Save button, no add-choice buttons
+                    changeBtn.style.display = '';
+                    return;
+                }
+
+                // Bare text like "cummins" that doesn't match anything existing —
+                // hide Save, force a category choice instead
+                changeBtn.style.display = 'none';
+
+                const clientName = `client/${q}`;
+                const leadName = `lead/${q}`;
+
+                const clientBtn = document.createElement('button');
+                clientBtn.textContent = `Save as ${clientName}`;
+                clientBtn.onclick = () => saveName(clientName);
+                addRow.appendChild(clientBtn);
+
+                const leadBtn = document.createElement('button');
+                leadBtn.textContent = `Save as ${leadName}`;
+                leadBtn.onclick = () => saveName(leadName);
+                addRow.appendChild(leadBtn);
+            }
+
+            input.addEventListener('input', renderPrefixChoice);
+            renderPrefixChoice();
+
+            changeBtn.onclick = () => {
+                const newName = input.value.trim();
+                if (!newName) return;
+                saveName(newName);
             };
             input.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') changeBtn.onclick();
+                if (e.key === 'Enter' && changeBtn.style.display !== 'none') changeBtn.onclick();
             });
         }
 
