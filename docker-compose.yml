@@ -5,7 +5,7 @@ services:
     ports:
       - "8081:8080"
     volumes:
-      - bridge-store:/app/store
+      - image-pdf-approve-reject-dashboard:/app/store
     restart: unless-stopped
 
   dashboard:
@@ -13,7 +13,7 @@ services:
     ports:
       - "4000:4000"
     volumes:
-      - bridge-store:/app/store:ro
+      - image-pdf-approve-reject-dashboard:/app/store:ro
     environment:
       - BRIDGE_URL=http://whatsapp-bridge:8080
     depends_on:
@@ -21,4 +21,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  bridge-store:
+  image-pdf-approve-reject-dashboard:
