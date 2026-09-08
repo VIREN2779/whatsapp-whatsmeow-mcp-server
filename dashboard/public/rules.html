@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rules</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0b0d12;
+            --surface: #12151d;
+            --surface-2: #171b25;
+            --border: #242a38;
+            --text: #e7e9ee;
+            --muted: #838da3;
+            --faint: #4d5568;
+            --accent: #7c9eff;
+            --accent-dim: rgba(124, 158, 255, 0.12);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            padding: 48px 32px 80px;
+            min-height: 100vh;
+        }
+
+        .wrap {
+            max-width: 880px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 30px;
+            font-weight: 700;
+            margin: 0 0 24px;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 24px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            overflow: hidden;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 12px 20px;
+            font-size: 13px;
+        }
+
+        th {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--faint);
+            background: var(--surface-2);
+            border-bottom: 1px solid var(--border);
+        }
+
+        tbody tr {
+            border-top: 1px solid var(--border);
+        }
+
+        td.phone {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        td.name {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent);
+        }
+
+        button {
+            font-family: 'Inter', sans-serif;
+            font-size: 12.5px;
+            font-weight: 600;
+            padding: 7px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: var(--surface-2);
+            color: var(--text);
+        }
+
+        button:hover {
+            filter: brightness(1.15);
+        }
+
+        .rename-input {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--text);
+            width: 100%;
+        }
+
+        .empty {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--muted);
+            font-size: 14px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+        <a class="back-link" href="/index.html">← Back to queue</a>
+        <h1>Rules</h1>
+        <div id="content"></div>
+        <datalist id="names-list"></datalist>
+    </div>
+
+    <script>
+        async function loadNamesDatalist() {
+            const res = await fetch('/api/names');
+            const names = await res.json();
+            document.getElementById('names-list').innerHTML =
+                names.map(n => `<option value="${escapeHtml(n)}">`).join('');
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        async function load() {
+            const res = await fetch('/api/rules');
+            const rows = await res.json();
+            render(rows);
+        }
+
+        function render(rows) {
+            const content = document.getElementById('content');
+
+            if (!rows.length) {
+                content.innerHTML = '<div class="empty">No rules yet — approve a number from the queue to create one.</div>';
+                return;
+            }
+
+            content.innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mobile number</th>
+                            <th>Name</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rules-body"></tbody>
+                </table>
+            `;
+
+            const tbody = document.getElementById('rules-body');
+            rows.forEach(r => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="phone">${escapeHtml(r.phone_number)}</td>
+                    <td class="name" data-cell="name">${escapeHtml(r.name)}</td>
+                    <td><button data-role="change">Change name</button></td>
+                `;
+                tr.querySelector('[data-role="change"]').addEventListener('click', () => startRename(tr, r));
+                tbody.appendChild(tr);
+            });
+        }
+
+        function startRename(tr, r) {
+            const nameCell = tr.querySelector('[data-cell="name"]');
+            nameCell.innerHTML = `<input class="rename-input" list="names-list" value="${escapeHtml(r.name)}">`;
+            const changeBtn = tr.querySelector('[data-role="change"]');
+            const input = nameCell.querySelector('input');
+            input.focus();
+            changeBtn.textContent = 'Save';
+            changeBtn.onclick = async () => {
+                const newName = input.value.trim();
+                if (!newName) return;
+                await fetch(`/api/rules/rename?phone_number=${encodeURIComponent(r.phone_number)}&name=${encodeURIComponent(newName)}`, { method: 'POST' });
+                load();
+            };
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') changeBtn.onclick();
+            });
+        }
+
+        (async function init() {
+            await loadNamesDatalist();
+            load();
+        })();
+    </script>
+</body>
+
+</html>
