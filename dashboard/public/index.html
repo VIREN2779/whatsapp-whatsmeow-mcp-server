@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Media Queue</title>
+    <title>Media</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link
         href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
@@ -467,7 +467,7 @@
 
                 const approveBtnHtml = isUnlinked
                     ? ''
-                    : `<button class="approve" data-role="group-approve">Approve</button>`;
+                    : `<button class="approve" data-role="group-approve">Approve all</button>`;
 
                 const nameTagHtml = existingName
                     ? `<span class="name-tag">${escapeHtml(existingName)}</span>`
@@ -488,6 +488,7 @@
                         <div class="row">
                             <span class="fname">${escapeHtml(row.filename)}</span>
                             <span class="actions">
+                                <button class="approve" data-id="${row.id}">Approve</button>
                                 <button class="reject" data-id="${row.id}">Reject</button>
                             </span>
                         </div>
@@ -498,6 +499,9 @@
                 if (approveBtn) {
                     approveBtn.addEventListener('click', () => onApproveClick(group));
                 }
+                group.querySelectorAll('.actions .approve[data-id]').forEach(btn => {
+                    btn.addEventListener('click', () => onSingleApproveClick(btn, group));
+                });
                 group.querySelectorAll('.reject').forEach(btn => {
                     btn.addEventListener('click', () => act(btn.dataset.id, 'reject'));
                 });
@@ -520,7 +524,7 @@
             document.querySelectorAll('.name-picker').forEach(el => el.remove());
         }
 
-        function openNamePicker(groupEl, phoneNumber) {
+        function openNamePicker(groupEl, phoneNumber, mediaId = null) {
             const already = groupEl.querySelector('.name-picker');
             if (already) {
                 closeNamePicker();
@@ -555,7 +559,13 @@
                     const opt = document.createElement('div');
                     opt.className = 'name-option';
                     opt.textContent = n;
-                    opt.addEventListener('click', () => approveGroup(phoneNumber, n));
+                    opt.addEventListener('click', () => {
+                        if (mediaId) {
+                            approveSingleWithName(mediaId, phoneNumber, n);
+                        } else {
+                            approveGroup(phoneNumber, n);
+                        }
+                    });
                     list.appendChild(opt);
                 });
 
@@ -572,7 +582,13 @@
                         const addBtn = document.createElement('button');
                         addBtn.className = 'name-add';
                         addBtn.textContent = `+ Add ${q}`;
-                        addBtn.addEventListener('click', () => approveGroup(phoneNumber, q));
+                        addBtn.addEventListener('click', () => {
+                            if (mediaId) {
+                                approveSingleWithName(mediaId, phoneNumber, q);
+                            } else {
+                                approveGroup(phoneNumber, q);
+                            }
+                        });
                         addRow.appendChild(addBtn);
                     }
                 } else {
@@ -583,7 +599,13 @@
                         const clientBtn = document.createElement('button');
                         clientBtn.className = 'name-add';
                         clientBtn.textContent = `+ Add ${clientName}`;
-                        clientBtn.addEventListener('click', () => approveGroup(phoneNumber, clientName));
+                        clientBtn.addEventListener('click', () => {
+                            if (mediaId) {
+                                approveSingleWithName(mediaId, phoneNumber, clientName);
+                            } else {
+                                approveGroup(phoneNumber, clientName);
+                            }
+                        });
                         addRow.appendChild(clientBtn);
                     }
 
@@ -591,7 +613,13 @@
                         const leadBtn = document.createElement('button');
                         leadBtn.className = 'name-add';
                         leadBtn.textContent = `+ Add ${leadName}`;
-                        leadBtn.addEventListener('click', () => approveGroup(phoneNumber, leadName));
+                        leadBtn.addEventListener('click', () => {
+                            if (mediaId) {
+                                approveSingleWithName(mediaId, phoneNumber, leadName);
+                            } else {
+                                approveGroup(phoneNumber, leadName);
+                            }
+                        });
                         addRow.appendChild(leadBtn);
                     }
                 }
@@ -627,6 +655,70 @@
         }
         checkWaStatus();
         setInterval(checkWaStatus, 10000);
+
+        async function onSingleApproveClick(btn, groupEl) {
+            const id = btn.dataset.id;
+            const phoneNumber = groupEl.dataset.phone;
+            const existingName = groupEl.dataset.name;
+
+            // Rule already exists for this number — approve immediately, no picker
+            if (existingName) {
+                try {
+                    const res = await fetch(
+                        `/api/approve?id=${encodeURIComponent(id)}`,
+                        { method: 'POST' }
+                    );
+                    const result = await res.json();
+                    if (result.ok) {
+                        await load();
+                    }
+                } catch (err) {
+                    console.error('Approve failed:', err);
+                }
+                return;
+            }
+
+            // No rule yet for this number — always open the name picker
+            openNamePicker(groupEl, phoneNumber, id);
+        }
+
+        async function approveSingleWithName(mediaId, phoneNumber, name) {
+            try {
+                // First create/update the rule for this number
+                const ruleRes = await fetch(
+                    `/api/rules/rename?phone_number=${encodeURIComponent(phoneNumber)}&name=${encodeURIComponent(name)}`,
+                    { method: 'POST' }
+                );
+
+                const ruleResult = await ruleRes.json();
+
+                if (!ruleResult.ok) {
+                    console.error('Failed to create rule:', ruleResult);
+                    return;
+                }
+
+                // Now approve ONLY this media
+                const approveRes = await fetch(
+                    `/api/approve?id=${encodeURIComponent(mediaId)}`,
+                    { method: 'POST' }
+                );
+
+                const approveResult = await approveRes.json();
+
+                if (!approveResult.ok) {
+                    console.error('Failed to approve media:', approveResult);
+                    return;
+                }
+
+                closeNamePicker();
+
+                await loadNames();
+                await load();
+
+            } catch (err) {
+                console.error('Single approve failed:', err);
+            }
+        }
 
         async function act(id, action) {
             await fetch(`/api/${action}?id=${encodeURIComponent(id)}`, { method: 'POST' });
