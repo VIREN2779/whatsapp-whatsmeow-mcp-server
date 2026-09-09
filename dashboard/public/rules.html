@@ -40,11 +40,33 @@
             margin: 0 auto;
         }
 
+        header {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            margin-bottom: 36px;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
         h1 {
             font-family: 'Space Grotesk', sans-serif;
             font-size: 30px;
             font-weight: 700;
-            margin: 0 0 24px;
+            margin: 0;
+        }
+
+        .stats {
+            display: flex;
+            gap: 22px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .stats b {
+            color: var(--text);
+            font-weight: 600;
         }
 
         .back-link {
@@ -155,6 +177,7 @@
             <div>
                 <h1>Rules</h1>
             </div>
+            <div class="stats" id="stats"></div>
         </header>
         <a class="back-link" href="/index.html">← Back to Media</a>
         <div id="content"></div>
@@ -163,13 +186,6 @@
 
     <script>
         let namesCache = [];
-
-        async function loadNamesDatalist() {
-            const res = await fetch('/api/names');
-            namesCache = await res.json();
-            document.getElementById('names-list').innerHTML =
-                namesCache.map(n => `<option value="${escapeHtml(n)}">`).join('');
-        }
 
         function escapeHtml(str) {
             const div = document.createElement('div');
@@ -180,7 +196,16 @@
         async function load() {
             const res = await fetch('/api/rules');
             const { data } = await res.json();
+            namesCache = [...new Set(data.results.map(r => r.name))].sort();
+            document.getElementById('names-list').innerHTML =
+                namesCache.map(n => `<option value="${escapeHtml(n)}">`).join('');
+            renderStats(data.results);
             render(data.results);
+        }
+
+        function renderStats(rows) {
+            document.getElementById('stats').innerHTML =
+                `<span><b>${rows.length}</b> numbers</span>`;
         }
 
         function render(rows) {
@@ -282,8 +307,7 @@
             });
         }
 
-        (async function init() {
-            await loadNamesDatalist();
+        (function init() {
             load();
         })();
     </script>

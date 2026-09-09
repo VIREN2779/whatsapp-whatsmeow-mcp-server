@@ -404,8 +404,9 @@
 
         async function loadNames() {
             try {
-                const res = await fetch('/api/names');
-                namesCache = await res.json();
+                const res = await fetch('/api/rules');
+                const { data } = await res.json();
+                namesCache = [...new Set(data.results.map(r => r.name))].sort();
             } catch {
                 namesCache = [];
             }

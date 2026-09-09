@@ -215,12 +215,6 @@ app.post('/api/reject', (c) => {
     return c.json({ ok: true });
 });
 
-app.get('/api/names', (c) => {
-    const rules = loadRules();
-    const names = [...new Set(rules.map(r => r.name))].sort();
-    return c.json(names);
-});
-
 // Wrapped response, sorted newest-first by timestamp.
 app.get('/api/rules', (c) => {
     const rules = loadRules();
