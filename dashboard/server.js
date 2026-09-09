@@ -8,29 +8,64 @@ const MESSAGES_DB_PATH = process.env.MESSAGES_DB_PATH || '/root/workspace/whatsa
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:8080';
 const STATUS_FILE = './status.json';
 const RULES_FILE = './rules.json';
+const UNLINKED_KEY = '__unlinked__';
 
 // Open messages.db READ-ONLY — never write to the bridge's own database
 const db = new DatabaseSync(MESSAGES_DB_PATH, { readOnly: true });
 
-// Load or create the local status tracker (approved/rejected message IDs)
+function statusKey(phoneNumber) {
+    return phoneNumber || UNLINKED_KEY;
+}
+
 function loadStatus() {
     if (!fs.existsSync(STATUS_FILE)) return {};
-    return JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8'));
+    const raw = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8'));
+
+    const alreadyMigrated = Object.values(raw).every(v => v && typeof v === 'object' && Array.isArray(v.media));
+    if (alreadyMigrated) return raw;
+
+    const migrated = {};
+    for (const [id, value] of Object.entries(raw)) {
+        const entry = typeof value === 'string'
+            ? { status: value, at: formatTimestamp(new Date(0)) }
+            : { status: value.status, at: value.at || formatTimestamp(new Date(0)) };
+
+        const message = db.prepare('SELECT phone_number FROM messages WHERE id = ? LIMIT 1').get(id);
+        const key = statusKey(message?.phone_number);
+
+        if (!migrated[key]) migrated[key] = { media: [] };
+        migrated[key].media.push({ id, ...entry });
+    }
+    return migrated;
 }
+
 function saveStatus(status) {
     fs.writeFileSync(STATUS_FILE, JSON.stringify(status, null, 2));
 }
-function markStatus(id, value) {
-    const status = loadStatus();
-    delete status[id];
-    return { [id]: value, ...status };
+
+function findStatusEntry(status, phoneNumber, id) {
+    const key = statusKey(phoneNumber);
+    return status[key]?.media.find(m => m.id === id) || null;
 }
-function markManyStatus(ids, value) {
-    let status = loadStatus();
-    for (const id of ids) {
-        delete status[id];
-        status = { [id]: value, ...status };
-    }
+
+// Loads, updates, and returns status (caller saves it) — mirrors the old
+// markStatus contract so call sites stay a one-liner.
+function markStatus(phoneNumber, id, value) {
+    const status = loadStatus();
+    const key = statusKey(phoneNumber);
+    if (!status[key]) status[key] = { media: [] };
+    status[key].media = status[key].media.filter(m => m.id !== id);
+    status[key].media.unshift({ id, status: value, at: formatTimestamp() });
+    return status;
+}
+
+function markManyStatus(phoneNumber, ids, value) {
+    const status = loadStatus();
+    const key = statusKey(phoneNumber);
+    if (!status[key]) status[key] = { media: [] };
+    const at = formatTimestamp();
+    status[key].media = status[key].media.filter(m => !ids.includes(m.id));
+    status[key].media.unshift(...ids.map(id => ({ id, status: value, at })));
     saveStatus(status);
 }
 
@@ -88,20 +123,39 @@ app.get('/api/all-media', (c) => {
     const rules = loadRules();
     const all = getMediaMessages();
     const pending = all
-        .filter(m => !status[m.id])
+        .filter(m => !findStatusEntry(status, m.phone_number, m.id))
         .map(m => ({ ...m, name: (m.phone_number && findRule(rules, m.phone_number)?.name) || null }));
     return c.json(pending);
 });
 
-app.get('/api/approved', (c) => {
+app.get('/api/approved-media', (c) => {
     const status = loadStatus();
     const rules = loadRules();
     const all = getMediaMessages();
-    const approved = all
-        .filter(m => status[m.id] === 'approved')
-        .map(m => ({ ...m, name: (m.phone_number && findRule(rules, m.phone_number)?.name) || null }))
+    const byId = new Map(all.map(m => [m.id, m]));
+
+    const results = Object.entries(status)
+        .filter(([key]) => key !== UNLINKED_KEY || true) // unlinked included too
+        .map(([phone_number, group]) => {
+            const media = group.media
+                .filter(entry => entry.status === 'approved' && byId.has(entry.id))
+                .map(entry => {
+                    const m = byId.get(entry.id);
+                    return { ...m, approvedAt: entry.at };
+                });
+
+            return {
+                phone_number: phone_number === UNLINKED_KEY ? null : phone_number,
+                name: (phone_number !== UNLINKED_KEY && findRule(rules, phone_number)?.name) || null,
+                latestApprovedAt: media[0]?.at,
+                media
+            };
+        })
+        .filter(group => group.media.length > 0)
+        .sort((a, b) => b.media[0].approvedAt.localeCompare(a.media[0].approvedAt))
         .slice(0, 100);
-    return c.json(approved);
+
+    return c.json({ success: true, data: { results } });
 });
 
 // Single-message actions kept for compatibility (e.g. per-row Reject)
@@ -140,7 +194,7 @@ app.post('/api/approve', (c) => {
     }
 
     // Rule exists -> approve ONLY this media
-    saveStatus(markStatus(id, 'approved'));
+    saveStatus(markStatus(phoneNumber, id, 'approved'));
 
     return c.json({
         ok: true,
@@ -153,7 +207,11 @@ app.post('/api/approve', (c) => {
 app.post('/api/reject', (c) => {
     const id = c.req.query('id');
     if (!id) return c.json({ ok: false, error: 'id query param is required' }, 400);
-    saveStatus(markStatus(id, 'rejected'));
+
+    const message = db.prepare('SELECT id, phone_number FROM messages WHERE id = ? LIMIT 1').get(id);
+    if (!message) return c.json({ ok: false, error: 'Media message not found' }, 404);
+
+    saveStatus(markStatus(message.phone_number, id, 'rejected'));
     return c.json({ ok: true });
 });
 
@@ -187,9 +245,9 @@ app.post('/api/approve-group', (c) => {
     const status = loadStatus();
     const all = getMediaMessages();
     const ids = all
-        .filter(m => m.phone_number === phone_number && !status[m.id])
+        .filter(m => m.phone_number === phone_number && !findStatusEntry(status, phone_number, m.id))
         .map(m => m.id);
-    markManyStatus(ids, 'approved');
+    markManyStatus(phone_number, ids, 'approved');
 
     return c.json({ ok: true, name: finalName, approved: ids.length });
 });

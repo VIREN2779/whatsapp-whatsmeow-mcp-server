@@ -57,7 +57,7 @@
             font-size: 11px;
             letter-spacing: 0.14em;
             text-transform: uppercase;
-            color: var(--faint);
+            color: lightslategrey;
             margin: 0 0 8px;
         }
 
@@ -87,8 +87,8 @@
             align-items: center;
             gap: 6px;
             color: var(--accent);
-            text-decoration: none;
-            font-size: 13px;
+            text-decoration: underline;
+            font-size: 14px;
             font-weight: 500;
             margin-bottom: 32px;
             transition: gap 0.15s ease;
@@ -165,7 +165,7 @@
         .badge {
             font-family: 'JetBrains Mono', monospace;
             font-size: 11px;
-            color: var(--muted);
+            color: white;
             background: var(--bg);
             border: 1px solid var(--border);
             border-radius: 20px;
@@ -227,8 +227,8 @@
     <div class="wrap">
         <header>
             <div>
-                <p class="eyebrow">Last 100</p>
                 <h1>Approved Media</h1>
+                <p class="eyebrow">Last 100</p>
             </div>
             <div class="stats" id="stats"></div>
         </header>
@@ -238,62 +238,46 @@
 
     <script>
         async function load() {
-            const res = await fetch('/api/approved');
-            const rows = await res.json();
-            renderStats(rows);
-            renderGroups(rows);
+            const res = await fetch('/api/approved-media');
+            const { data } = await res.json();
+            renderStats(data.results);
+            renderGroups(data.results);
         }
 
-        function renderStats(rows) {
-            const numbers = new Set(rows.filter(r => r.phone_number && r.phone_number !== 'null').map(r => r.phone_number));
+        function renderStats(groups) {
+            const totalMedia = groups.reduce((sum, g) => sum + g.media.length, 0);
+            const numbers = groups.filter(g => g.phone_number).length;
             document.getElementById('stats').innerHTML =
-                `<span><b>${rows.length}</b> approved</span><span><b>${numbers.size}</b> numbers</span>`;
+                `<span><b>${totalMedia}</b> approved</span><span><b>${numbers}</b> numbers</span>`;
         }
 
-        function renderGroups(rows) {
+        function renderGroups(groups) {
             const container = document.getElementById('groups');
             container.innerHTML = '';
 
-            if (!rows.length) {
+            if (!groups.length) {
                 container.innerHTML = '<div class="empty">Queue is empty — nothing waiting on review.</div>';
                 return;
             }
 
-            const groups = new Map();
-            rows.forEach(row => {
-                const key = row.phone_number && row.phone_number !== 'null' ? row.phone_number : '__unlinked__';
-                if (!groups.has(key)) groups.set(key, []);
-                groups.get(key).push(row);
-            });
-
-            // rows arrives sorted timestamp DESC, so items[0] in each group is that
-            // group's newest message — sort groups by that so fresh numbers rise to top
-            const latestTs = items => new Date(items[0].timestamp).getTime();
-
-            const ordered = [...groups.entries()].sort((a, b) => {
-                if (a[0] === '__unlinked__') return 1;
-                if (b[0] === '__unlinked__') return -1;
-                return latestTs(b[1]) - latestTs(a[1]);
-            });
-
-            ordered.forEach(([key, items]) => {
-                const isUnlinked = key === '__unlinked__';
-                const group = document.createElement('div');
-                group.className = 'group' + (isUnlinked ? ' unlinked' : '');
-                group.innerHTML = `
+            groups.forEach(group => {
+                const isUnlinked = !group.phone_number;
+                const el = document.createElement('div');
+                el.className = 'group' + (isUnlinked ? ' unlinked' : '');
+                el.innerHTML = `
                     <div class="group-head">
                         <div class="group-number">
-                        <span class="num">${isUnlinked ? 'No number linked' : key}</span>
+                        <span class="num">${isUnlinked ? 'No number linked' : group.phone_number}</span>
                     </div>
-                    <span class="badge">${items.length}</span>
+                    <span class="badge">${group.media.length}</span>
                     </div>
-                    ${items.map(row => `
+                    ${group.media.map(row => `
                         <div class="row">
                             <span class="fname">${row.filename}</span>
                         </div>
                     `).join('')}
                 `;
-                container.appendChild(group);
+                container.appendChild(el);
             });
         }
 

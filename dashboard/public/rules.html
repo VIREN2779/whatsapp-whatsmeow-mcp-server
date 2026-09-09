@@ -52,8 +52,8 @@
             align-items: center;
             gap: 6px;
             color: var(--accent);
-            text-decoration: none;
-            font-size: 13px;
+            text-decoration: underline;
+            font-size: 14px;
             font-weight: 500;
             margin-bottom: 24px;
         }
@@ -151,8 +151,12 @@
 
 <body>
     <div class="wrap">
-        <a class="back-link" href="/index.html">← Back to queue</a>
-        <h1>Rules</h1>
+        <header>
+            <div>
+                <h1>Rules</h1>
+            </div>
+        </header>
+        <a class="back-link" href="/index.html">← Back to Media</a>
         <div id="content"></div>
         <datalist id="names-list"></datalist>
     </div>
@@ -175,8 +179,8 @@
 
         async function load() {
             const res = await fetch('/api/rules');
-            const rows = await res.json();
-            render(rows);
+            const { data } = await res.json();
+            render(data.results);
         }
 
         function render(rows) {
@@ -206,7 +210,7 @@
                 tr.innerHTML = `
                     <td class="phone">${escapeHtml(r.phone_number)}</td>
                     <td class="name" data-cell="name">${escapeHtml(r.name)}</td>
-                    <td><button data-role="change">Change name</button></td>
+                    <td><button data-role="change">Edit name</button></td>
                 `;
                 // .onclick (not addEventListener) so startRename's later reassignment
                 // fully replaces this handler instead of both firing on the same click
