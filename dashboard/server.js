@@ -289,6 +289,63 @@ app.post('/api/login', async (c) => {
     return c.json({ ok: true });
 });
 
+// direct get data API
+app.get('/api/messages', (c) => {
+    const limitParam = c.req.query('limit');
+    const limit = limitParam ? Math.min(parseInt(limitParam, 10), 500) : null;
+    const id = c.req.query('id');
+    const phone_number = c.req.query('phone_number');
+    const chat_jid = c.req.query('chat_jid');
+    const sender = c.req.query('sender');
+    const search = c.req.query('query');
+    const media_type = c.req.query('media_type'); // supports comma-separated list, e.g. "image,document"
+    const is_from_me = c.req.query('is_from_me');
+    const after = c.req.query('after');
+    const before = c.req.query('before');
+    const filename = c.req.query('filename');
+
+    const where = [];
+    const params = [];
+
+    if (id) { where.push('id = ?'); params.push(id); }
+    if (phone_number) { where.push('phone_number = ?'); params.push(phone_number); }
+    if (chat_jid) { where.push('chat_jid = ?'); params.push(chat_jid); }
+    if (sender) { where.push('sender = ?'); params.push(sender); }
+    if (search) { where.push('LOWER(content) LIKE LOWER(?)'); params.push(`%${search}%`); }
+    if (media_type) {
+        const types = media_type.split(',').map(t => t.trim()).filter(Boolean);
+        if (types.length) {
+            where.push(`media_type IN (${types.map(() => '?').join(',')})`);
+            params.push(...types);
+        }
+    }
+    if (is_from_me !== undefined) { where.push('is_from_me = ?'); params.push(Number(is_from_me)); }
+    if (after) { where.push('timestamp > ?'); params.push(after); }
+    if (before) { where.push('timestamp < ?'); params.push(before); }
+    if (filename) { where.push('filename = ?'); params.push(filename); }
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const limitClause = limit ? 'LIMIT ?' : '';
+    const queryParams = limit ? [...params, limit] : params;
+
+    const rows = db.prepare(`
+        SELECT id, chat_jid, sender, phone_number, content, timestamp, is_from_me, media_type, filename
+        FROM messages
+        ${whereClause}
+        ORDER BY timestamp DESC
+        ${limitClause}
+    `).all(...queryParams);
+
+    return c.json({
+        success: true,
+        data: {
+            results: rows,
+            count: rows.length,
+            message: rows.length === 0 ? 'No matching messages found' : undefined
+        }
+    });
+});
+
 app.use('/*', serveStatic({ root: './public' }));
 
 serve({ fetch: app.fetch, port: 4000 }, (info) => {
