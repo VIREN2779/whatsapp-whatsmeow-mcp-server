@@ -3,12 +3,15 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'fs';
+import path from 'path';
 
 const MESSAGES_DB_PATH = process.env.MESSAGES_DB_PATH || '/app/store/messages.db';
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:8080';
 const STATUS_FILE = process.env.STATUS_FILE || './status.json';
 const RULES_FILE = process.env.RULES_FILE || './rules.json';
 const UNLINKED_KEY = '__unlinked__';
+const STORE_DIR = path.dirname(MESSAGES_DB_PATH); // e.g. /app/store — same folder the bridge downloads media into
+const EXPORT_ROOT = process.env.EXPORT_ROOT || './export';
 
 // Open messages.db READ-ONLY — never write to the bridge's own database
 const db = new DatabaseSync(MESSAGES_DB_PATH, { readOnly: true });
@@ -75,6 +78,21 @@ function formatTimestamp(date = new Date()) {
     const pad = (n) => String(n).padStart(2, '0');
     return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ` +
         `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} +0000 UTC`;
+}
+
+// Copies an already-downloaded media file into <EXPORT_ROOT>/<rule_name>/<phone_number>/<filename>.
+// Silently skips if the source file hasn't been downloaded by the bridge yet.
+function exportApprovedMedia(phoneNumber, filename, ruleName) {
+    if (!phoneNumber || !filename || !ruleName) return;
+    try {
+        const src = path.join(STORE_DIR, phoneNumber, filename);
+        if (!fs.existsSync(src)) return;
+        const destDir = path.join(EXPORT_ROOT, ruleName, phoneNumber);
+        fs.mkdirSync(destDir, { recursive: true });
+        fs.copyFileSync(src, path.join(destDir, filename));
+    } catch (err) {
+        console.error('exportApprovedMedia failed:', err);
+    }
 }
 
 // Rules are stored as a flat array: [{ phone_number, name, timestamp }, ...]
@@ -165,7 +183,7 @@ app.post('/api/approve', (c) => {
 
     // Find the media message
     const message = db.prepare(`
-        SELECT id, phone_number
+        SELECT id, phone_number, filename
         FROM messages
         WHERE id = ?
         LIMIT 1
@@ -195,6 +213,7 @@ app.post('/api/approve', (c) => {
 
     // Rule exists -> approve ONLY this media
     saveStatus(markStatus(phoneNumber, id, 'approved'));
+    exportApprovedMedia(phoneNumber, message.filename, rule.name);
 
     return c.json({
         ok: true,
@@ -238,10 +257,10 @@ app.post('/api/approve-group', (c) => {
 
     const status = loadStatus();
     const all = getMediaMessages();
-    const ids = all
-        .filter(m => m.phone_number === phone_number && !findStatusEntry(status, phone_number, m.id))
-        .map(m => m.id);
+    const toApprove = all.filter(m => m.phone_number === phone_number && !findStatusEntry(status, phone_number, m.id));
+    const ids = toApprove.map(m => m.id);
     markManyStatus(phone_number, ids, 'approved');
+    toApprove.forEach(m => exportApprovedMedia(phone_number, m.filename, finalName));
 
     return c.json({ ok: true, name: finalName, approved: ids.length });
 });
