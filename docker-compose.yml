@@ -16,12 +16,14 @@ services:
       - bridge-store:/app/store:ro
       - dashboard-data:/app/data
       - 'G:/My Drive/OCR In - Ketul:/app/export'
+      - 'G:/My Drive/OCR In - Ketul/downloaded-images:/app/downloads'
     environment:
       - BRIDGE_URL=http://whatsapp-bridge:8080
       - STATUS_FILE=/app/data/status.json
       - RULES_FILE=/app/data/rules.json
       - MESSAGES_DB_PATH=/app/store/messages.db
       - EXPORT_ROOT=/app/export
+      - DOWNLOADS_DIR=/app/downloads
     depends_on:
       - whatsapp-bridge
     restart: unless-stopped

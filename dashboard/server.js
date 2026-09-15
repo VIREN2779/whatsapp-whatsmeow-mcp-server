@@ -4,14 +4,16 @@ import { Hono } from 'hono';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
-const MESSAGES_DB_PATH = process.env.MESSAGES_DB_PATH || '/app/store/messages.db';
+const MESSAGES_DB_PATH = process.env.MESSAGES_DB_PATH || '/app/store/messages.db'; // This path for client PC docker
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:8080';
 const STATUS_FILE = process.env.STATUS_FILE || './status.json';
 const RULES_FILE = process.env.RULES_FILE || './rules.json';
 const UNLINKED_KEY = '__unlinked__';
 const STORE_DIR = path.dirname(MESSAGES_DB_PATH); // e.g. /app/store — same folder the bridge downloads media into
 const EXPORT_ROOT = process.env.EXPORT_ROOT || './export';
+const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(os.homedir(), 'Downloads', 'downloaded-images');
 
 // Open messages.db READ-ONLY — never write to the bridge's own database
 const db = new DatabaseSync(MESSAGES_DB_PATH, { readOnly: true });
@@ -344,6 +346,102 @@ app.get('/api/messages', (c) => {
             message: rows.length === 0 ? 'No matching messages found' : undefined
         }
     });
+});
+
+async function downloadAndSaveToDownloads(message) {
+    if (!message.media_type || !message.filename) {
+        return { success: false, error: 'Message has no media' };
+    }
+
+    const folderName = message.phone_number || message.chat_jid.replace(/:/g, '_');
+    const sourcePath = path.join(STORE_DIR, folderName, message.filename);
+
+    if (!fs.existsSync(sourcePath)) {
+        let bridgeResult;
+        try {
+            const resp = await fetch(`${BRIDGE_URL}/api/download`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message_id: message.id, chat_jid: message.chat_jid })
+            });
+            bridgeResult = await resp.json();
+        } catch (err) {
+            return { success: false, error: `Bridge unreachable: ${err.message}` };
+        }
+        if (!bridgeResult.success) {
+            return { success: false, error: bridgeResult.message || 'Download failed' };
+        }
+        if (!fs.existsSync(sourcePath)) {
+            return { success: false, error: 'Downloaded but not found on shared volume', path: sourcePath };
+        }
+    }
+
+    try {
+        const destDir = path.join(DOWNLOADS_DIR, folderName);
+        fs.mkdirSync(destDir, { recursive: true });
+        const destPath = path.join(destDir, message.filename);
+        fs.copyFileSync(sourcePath, destPath);
+        return { success: true, filename: message.filename, path: destPath.replace(/\\/g, '/') };
+    } catch (err) {
+        return { success: false, error: `Failed to save to Downloads: ${err.message}` };
+    }
+}
+
+app.get('/api/media/download', async (c) => {
+    const filename = c.req.query('filename');
+    const phone_number = c.req.query('phone_number');
+    const limitParam = c.req.query('limit');
+
+    if (filename) {
+        const message = db.prepare(`
+            SELECT id, chat_jid, phone_number, filename, media_type
+            FROM messages WHERE filename = ? LIMIT 1
+        `).get(filename);
+
+        if (!message) return c.json({ success: false, message: 'No media found with that filename' }, 404);
+
+        const result = await downloadAndSaveToDownloads(message);
+        if (!result.success) return c.json(result, 502);
+
+        return c.json({
+            success: true,
+            message: `${result.filename} downloaded successfully`,
+            path: result.path.replace(/\\/g, '/')
+        });
+    }
+
+    if (phone_number) {
+        const limit = limitParam ? Math.min(parseInt(limitParam, 10), 500) : null;
+        const limitClause = limit ? 'LIMIT ?' : '';
+        const params = limit ? [phone_number, limit] : [phone_number];
+
+        const messages = db.prepare(`
+            SELECT id, chat_jid, phone_number, filename, media_type
+            FROM messages
+            WHERE phone_number = ? AND media_type IN ('image', 'document') AND filename != ''
+            ORDER BY timestamp DESC
+            ${limitClause}
+        `).all(...params);
+
+        if (!messages.length) {
+            return c.json({ success: false, error: 'No media found for that phone number' }, 404);
+        }
+
+        const results = [];
+        for (const message of messages) {
+            results.push(await downloadAndSaveToDownloads(message));
+        }
+
+        const successCount = results.filter(r => r.success).length;
+
+        return c.json({
+            success: successCount > 0,
+            message: `${successCount} of ${results.length} file(s) downloaded successfully`,
+            data: { results, count: results.length }
+        });
+    }
+
+    return c.json({ success: false, error: 'filename or phone_number is required' }, 400);
 });
 
 app.use('/*', serveStatic({ root: './public' }));
