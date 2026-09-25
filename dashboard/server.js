@@ -7,6 +7,7 @@ import path from 'path';
 import os from 'os';
 
 const MESSAGES_DB_PATH = process.env.MESSAGES_DB_PATH || '/app/store/messages.db'; // This path for client PC docker
+// const MESSAGES_DB_PATH = process.env.MESSAGES_DB_PATH || '/root/workspace/whatsameow/whatsapp-bridge/store/messages.db'; // root path for office live server
 const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:8080';
 const STATUS_FILE = process.env.STATUS_FILE || './status.json';
 const RULES_FILE = process.env.RULES_FILE || './rules.json';
@@ -14,6 +15,8 @@ const UNLINKED_KEY = '__unlinked__';
 const STORE_DIR = path.dirname(MESSAGES_DB_PATH); // e.g. /app/store — same folder the bridge downloads media into
 const EXPORT_ROOT = process.env.EXPORT_ROOT || './export';
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(os.homedir(), 'Downloads', 'downloaded-images');
+// Host-visible path for API responses only; file operations use DOWNLOADS_DIR.
+const DOWNLOADS_HOST_DIR = process.env.DOWNLOADS_HOST_DIR || '';
 
 // Open messages.db READ-ONLY — never write to the bridge's own database
 const db = new DatabaseSync(MESSAGES_DB_PATH, { readOnly: true });
@@ -80,6 +83,12 @@ function formatTimestamp(date = new Date()) {
     const pad = (n) => String(n).padStart(2, '0');
     return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ` +
         `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} +0000 UTC`;
+}
+
+function formatLocalDateTime(date = new Date()) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+        `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 // Copies an already-downloaded media file into <EXPORT_ROOT>/<rule_name>/<phone_number>/<filename>.
@@ -331,8 +340,10 @@ app.get('/api/messages', (c) => {
     const queryParams = limit ? [...params, limit] : params;
 
     const rows = db.prepare(`
-        SELECT id, chat_jid, sender, phone_number, content, timestamp, is_from_me, media_type, filename
-        FROM messages
+        SELECT m.id, m.chat_jid, m.sender, m.phone_number, m.content, m.timestamp,
+               m.is_from_me, m.media_type, m.filename, COALESCE(c.name, '') AS user_name
+        FROM messages m
+        LEFT JOIN chats c ON c.jid = m.chat_jid
         ${whereClause}
         ORDER BY timestamp DESC
         ${limitClause}
@@ -381,31 +392,49 @@ async function downloadAndSaveToDownloads(message) {
         fs.mkdirSync(destDir, { recursive: true });
         const destPath = path.join(destDir, message.filename);
         fs.copyFileSync(sourcePath, destPath);
-        return { success: true, filename: message.filename, path: destPath.replace(/\\/g, '/') };
+        const responsePath = DOWNLOADS_HOST_DIR
+            ? path.posix.join(DOWNLOADS_HOST_DIR.replace(/\\/g, '/'), folderName, message.filename)
+            : destPath.replace(/\\/g, '/');
+        return { success: true, filename: message.filename, path: responsePath };
     } catch (err) {
         return { success: false, error: `Failed to save to Downloads: ${err.message}` };
     }
 }
 
+// Download modes:
+//   ?filename=X.jpg                              -> download that one file
+//   ?phone_number=X&date_after=YYYY-MM-DD        -> media for that number from date_after to now
+//   Add &limit=N to limit phone-number downloads to the last N matching files.
 app.get('/api/media/download', async (c) => {
     const filename = c.req.query('filename');
     const phone_number = c.req.query('phone_number');
     const limitParam = c.req.query('limit');
+    const date_after = c.req.query('date_after');
+
+    // date_after is require when phone_number comes in query param
+    if (phone_number !== undefined && !date_after?.trim()) {
+        return c.json({ success: false, error: 'date_after is required when phone_number is provided' }, 400);
+    }
 
     if (filename) {
         const message = db.prepare(`
-            SELECT id, chat_jid, phone_number, filename, media_type
-            FROM messages WHERE filename = ? LIMIT 1
+            SELECT m.id, m.chat_jid, m.phone_number, m.filename, m.media_type,
+                   COALESCE(c.name, '') AS user_name
+            FROM messages m
+            LEFT JOIN chats c ON c.jid = m.chat_jid
+            WHERE m.filename = ? LIMIT 1
         `).get(filename);
 
         if (!message) return c.json({ success: false, message: 'No media found with that filename' }, 404);
 
         const result = await downloadAndSaveToDownloads(message);
+        result.user_name = message.user_name;
         if (!result.success) return c.json(result, 502);
 
         return c.json({
             success: true,
             message: `${result.filename} downloaded successfully`,
+            user_name: message.user_name,
             path: result.path.replace(/\\/g, '/')
         });
     }
@@ -413,15 +442,31 @@ app.get('/api/media/download', async (c) => {
     if (phone_number) {
         const limit = limitParam ? Math.min(parseInt(limitParam, 10), 500) : null;
         const limitClause = limit ? 'LIMIT ?' : '';
-        const params = limit ? [phone_number, limit] : [phone_number];
+        const where = [
+            'phone_number = ?',
+            "media_type IN ('image', 'document')",
+            "filename != ''"
+        ];
+        const params = [phone_number];
+
+        if (date_after) {
+            where.push('substr(timestamp, 1, 19) >= ?');
+            params.push(date_after);
+            where.push('substr(timestamp, 1, 19) <= ?');
+            params.push(formatLocalDateTime());
+        }
+
+        const queryParams = limit ? [...params, limit] : params;
 
         const messages = db.prepare(`
-            SELECT id, chat_jid, phone_number, filename, media_type
-            FROM messages
-            WHERE phone_number = ? AND media_type IN ('image', 'document') AND filename != ''
+            SELECT m.id, m.chat_jid, m.phone_number, m.filename, m.media_type,
+                   COALESCE(c.name, '') AS user_name
+            FROM messages m
+            LEFT JOIN chats c ON c.jid = m.chat_jid
+            WHERE ${where.join(' AND ')}
             ORDER BY timestamp DESC
             ${limitClause}
-        `).all(...params);
+        `).all(...queryParams);
 
         if (!messages.length) {
             return c.json({ success: false, error: 'No media found for that phone number' }, 404);
@@ -429,7 +474,8 @@ app.get('/api/media/download', async (c) => {
 
         const results = [];
         for (const message of messages) {
-            results.push(await downloadAndSaveToDownloads(message));
+            const result = await downloadAndSaveToDownloads(message);
+            results.push({ ...result, user_name: message.user_name });
         }
 
         const successCount = results.filter(r => r.success).length;
