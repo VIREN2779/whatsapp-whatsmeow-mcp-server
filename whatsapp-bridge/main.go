@@ -720,11 +720,15 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
-	sender := msg.Info.Sender.User
+	sender := msg.Info.Sender.ToNonAD().String()
 	senderNumber := resolveSenderPhoneNumber(client, msg, logger)
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
-	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+	livePushName := ""
+	if !msg.Info.IsFromMe && (msg.Info.Chat.Server == types.DefaultUserServer || msg.Info.Chat.Server == types.HiddenUserServer) {
+		livePushName = msg.Info.PushName
+	}
+	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger, livePushName)
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
@@ -1268,6 +1272,7 @@ func main() {
 
 			case *events.Connected:
 				logger.Infof("Connected to WhatsApp")
+				go refreshChatNames(c, messageStore, logger)
 
 			case *events.LoggedOut:
 				logger.Warnf("Device logged out, please scan QR code to log in again")
@@ -1315,11 +1320,11 @@ func main() {
 }
 
 // GetChatName determines the appropriate name for a chat based on JID and other info
-func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
+func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger, livePushNames ...string) string {
 	// First, check if chat already exists in database with a name
 	var existingName string
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
+	if err == nil && strings.TrimSpace(existingName) != "" && !isChatNamePlaceholder(existingName, jid) {
 		// Chat exists with a name, use that
 		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName
@@ -1379,22 +1384,91 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
-		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
-			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
-			name = sender
-		} else {
-			// Last fallback to JID
-			name = jid.User
+		lookupJID := jid.ToNonAD()
+		if client != nil && client.Store != nil {
+			if lookupJID.Server == types.HiddenUserServer && client.Store.LIDs != nil {
+				if pn, lookupErr := client.Store.LIDs.GetPNForLID(context.Background(), lookupJID); lookupErr == nil && !pn.IsEmpty() {
+					lookupJID = pn.ToNonAD()
+				}
+			}
+			if client.Store.Contacts != nil {
+				for _, candidateJID := range []types.JID{lookupJID, jid.ToNonAD()} {
+					contact, lookupErr := client.Store.Contacts.GetContact(context.Background(), candidateJID)
+					if lookupErr != nil {
+						continue
+					}
+					livePushName := ""
+					if len(livePushNames) > 0 {
+						livePushName = livePushNames[0]
+					}
+					for _, candidate := range []string{contact.FullName, livePushName, contact.PushName, contact.BusinessName} {
+						if strings.TrimSpace(candidate) != "" {
+							name = candidate
+							break
+						}
+					}
+					if name != "" {
+						break
+					}
+				}
+			}
+		}
+		if name == "" && len(livePushNames) > 0 && strings.TrimSpace(livePushNames[0]) != "" {
+			name = livePushNames[0]
+		}
+		if name == "" {
+			name = existingName
+		}
+		if strings.TrimSpace(name) == "" {
+			name = lookupJID.User
 		}
 
 		logger.Infof("Using contact name: %s", name)
 	}
 
 	return name
+}
+
+func isChatNamePlaceholder(name string, jid types.JID) bool {
+	name = strings.TrimSpace(name)
+	return name == jid.User || name == jid.String() || name == jid.ToNonAD().String()
+}
+
+func refreshChatNames(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) {
+	rows, err := store.db.Query("SELECT jid, name FROM chats")
+	if err != nil {
+		logger.Warnf("Failed to read chat names: %v", err)
+		return
+	}
+	type chatName struct{ jid, name string }
+	var placeholders []chatName
+	for rows.Next() {
+		var chat chatName
+		var storedName sql.NullString
+		if err = rows.Scan(&chat.jid, &storedName); err != nil {
+			break
+		}
+		chat.name = storedName.String
+		jid, parseErr := types.ParseJID(chat.jid)
+		if parseErr == nil && (jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer) && (strings.TrimSpace(chat.name) == "" || isChatNamePlaceholder(chat.name, jid)) {
+			placeholders = append(placeholders, chat)
+		}
+	}
+	readErr := rows.Err()
+	rows.Close()
+	if err != nil || readErr != nil {
+		logger.Warnf("Failed to scan chat names: %v / %v", err, readErr)
+		return
+	}
+	for _, chat := range placeholders {
+		jid, _ := types.ParseJID(chat.jid)
+		name := GetChatName(client, store, jid, chat.jid, nil, "", logger)
+		if name != chat.name && !isChatNamePlaceholder(name, jid) {
+			if _, err := store.db.Exec("UPDATE chats SET name = ? WHERE jid = ? AND COALESCE(name, '') = ?", name, chat.jid, chat.name); err != nil {
+				logger.Warnf("Failed to refresh chat name for %s: %v", chat.jid, err)
+			}
+		}
+	}
 }
 
 // Handle history sync events
@@ -1473,21 +1547,22 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Determine sender
-				var sender string
-				isFromMe := false
-				if msg.Message.Key != nil {
-					if msg.Message.Key.FromMe != nil {
-						isFromMe = *msg.Message.Key.FromMe
-					}
-					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
-						sender = *msg.Message.Key.Participant
-					} else if isFromMe {
-						sender = client.Store.ID.User
-					} else {
-						sender = jid.User
+				key := msg.Message.GetKey()
+				isFromMe := key.GetFromMe()
+				sender := jid.ToNonAD().String()
+				if isFromMe {
+					if client.Store.ID != nil {
+						sender = client.Store.ID.ToNonAD().String()
 					}
 				} else {
-					sender = jid.User
+					participant := key.GetParticipant()
+					if participant == "" {
+						// Synced group messages may carry the sender outside the key.
+						participant = msg.Message.GetParticipant()
+					}
+					if participant != "" {
+						sender = participant
+					}
 				}
 
 				senderNumber := sender
