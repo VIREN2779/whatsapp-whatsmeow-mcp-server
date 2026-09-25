@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/mdp/qrterminal"
 	_ "modernc.org/sqlite"
 
 	"bytes"
@@ -35,6 +35,69 @@ import (
 
 const registrationFormURL = "https://docs.google.com/forms/d/e/1FAIpQLScMmHtR0G6op2Rq3-w6qFpt-EimJ9Owz14nwOqBDoOfgcfmRA/viewform"
 const registrationSheetCSVURL = "https://docs.google.com/spreadsheets/d/1nzfQvGLL65eGI--kMbfYtoQ9Pu1ulSdyhGRmx7UA8iw/export?format=csv&gid=585141890"
+
+var (
+	loginMu       sync.Mutex
+	latestQRCode  string
+	waConnected   bool
+	deviceInvalid bool
+)
+
+var loggingIn bool
+
+func startQRLogin(client *whatsmeow.Client, logger waLog.Logger) {
+	loginMu.Lock()
+	if loggingIn {
+		loginMu.Unlock()
+		logger.Warnf("[startQRLogin] login already in progress, ignoring duplicate call")
+		return
+	}
+	loggingIn = true
+	latestQRCode = ""
+	loginMu.Unlock()
+
+	defer func() {
+		loginMu.Lock()
+		loggingIn = false
+		loginMu.Unlock()
+	}()
+
+	// If a previous attempt left the client half-connected, reset it first
+	if client.IsConnected() {
+		client.Disconnect()
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	qrChan, err := client.GetQRChannel(context.Background())
+	if err != nil {
+		logger.Errorf("[startQRLogin] GetQRChannel failed: %v", err)
+		return
+	}
+
+	if err := client.Connect(); err != nil {
+		logger.Errorf("[startQRLogin] Connect failed: %v", err)
+		return
+	}
+	for evt := range qrChan {
+		logger.Infof("[startQRLogin] QR event: %s", evt.Event)
+		if evt.Event == "code" {
+			loginMu.Lock()
+			latestQRCode = evt.Code
+			loginMu.Unlock()
+		} else if evt.Event == "success" {
+			loginMu.Lock()
+			latestQRCode = ""
+			waConnected = true
+			loginMu.Unlock()
+			break
+		} else {
+			// timeout or error event — clear QR so the button can be retried cleanly
+			loginMu.Lock()
+			latestQRCode = ""
+			loginMu.Unlock()
+		}
+	}
+}
 
 // Message represents a chat message for our client
 type Message struct {
@@ -103,6 +166,25 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to migrate messages table: %v", err)
 	}
 
+	// Migration: add phone_number column if it doesn't already exist
+	_, err = db.Exec(`ALTER TABLE messages ADD COLUMN phone_number TEXT`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate messages table (phone_number): %v", err)
+	}
+
+	// Backfill old direct-chat rows where phone_number was not stored yet.
+	_, err = db.Exec(`
+		UPDATE messages
+		SET phone_number = substr(chat_jid, 1, instr(chat_jid, '@') - 1)
+		WHERE (phone_number IS NULL OR phone_number = '')
+		  AND chat_jid LIKE '%@s.whatsapp.net'
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to backfill messages table (phone_number): %v", err)
+	}
+
 	return &MessageStore{db: db}, nil
 }
 
@@ -122,17 +204,18 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	mediaType, filename, url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64, phoneNumber string) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
 	}
+	phoneNumber = messagePhoneNumber(chatJID, sender, phoneNumber)
 
 	_, err := store.db.Exec(
 		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, direct_path, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+         (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, direct_path, media_key, file_sha256, file_enc_sha256, file_length, phone_number) 
+     	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength, phoneNumber,
 	)
 	return err
 }
@@ -390,6 +473,31 @@ func phoneNumberFromJID(jid types.JID) string {
 	}
 	return jid.User
 }
+
+func phoneNumberFromJIDString(rawJID string) string {
+	jid, err := types.ParseJID(rawJID)
+	if err != nil {
+		return ""
+	}
+	return phoneNumberFromJID(jid)
+}
+
+func messagePhoneNumber(chatJID, sender, resolvedPhoneNumber string) string {
+	if number := phoneNumberFromJIDString(chatJID); number != "" {
+		return number
+	}
+	if number := phoneNumberFromJIDString(resolvedPhoneNumber); number != "" {
+		return number
+	}
+	if resolvedPhoneNumber != "" && !strings.Contains(resolvedPhoneNumber, "@") {
+		return resolvedPhoneNumber
+	}
+	if number := phoneNumberFromJIDString(sender); number != "" {
+		return number
+	}
+	return ""
+}
+
 func resolveSenderPhoneNumber(client *whatsmeow.Client, msg *events.Message, logger waLog.Logger) string {
 	logger.Infof("[resolveSenderPhoneNumber] start: Sender=%s SenderAlt=%s Chat=%s",
 		msg.Info.Sender, msg.Info.SenderAlt, msg.Info.Chat)
@@ -456,6 +564,59 @@ func resolveSenderPhoneNumber(client *whatsmeow.Client, msg *events.Message, log
 		return msg.Info.Sender.User // all lookups failed, falling back to raw Sender.User (likely LID)
 	}
 	return msg.Info.Chat.User // all lookups failed, falling back to raw Chat.User
+}
+
+// resolvePhoneNumberFromJIDString does the same LID -> phone number resolution as
+// resolveSenderPhoneNumber, but works from a raw JID string (what history sync gives us)
+// instead of an events.Message.
+func resolvePhoneNumberFromJIDString(client *whatsmeow.Client, rawJID string, chatJID types.JID, logger waLog.Logger) string {
+	if rawJID == "" {
+		return ""
+	}
+
+	jid, err := types.ParseJID(rawJID)
+	if err != nil {
+		return rawJID // not a parseable JID, return as-is
+	}
+
+	if number := phoneNumberFromJID(jid); number != "" {
+		return number
+	}
+
+	if client != nil && client.Store != nil && client.Store.LIDs != nil && jid.Server == types.HiddenUserServer {
+		pn, err := client.Store.LIDs.GetPNForLID(context.Background(), jid.ToNonAD())
+		if err == nil {
+			if number := phoneNumberFromJID(pn); number != "" {
+				return number
+			}
+		} else {
+			logger.Warnf("[resolvePhoneNumberFromJIDString] LID store lookup failed for %s: %v", jid, err)
+		}
+	}
+
+	if client != nil && chatJID.Server == types.GroupServer && jid.Server == types.HiddenUserServer {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		groupInfo, err := client.GetGroupInfo(ctx, chatJID)
+		if err == nil {
+			for _, participant := range groupInfo.Participants {
+				if participant.LID.ToNonAD() != jid.ToNonAD() {
+					continue
+				}
+				if number := phoneNumberFromJID(participant.PhoneNumber); number != "" {
+					return number
+				}
+				if number := phoneNumberFromJID(participant.JID); number != "" {
+					return number
+				}
+			}
+		} else {
+			logger.Warnf("[resolvePhoneNumberFromJIDString] GetGroupInfo failed for %s: %v", chatJID, err)
+		}
+	}
+
+	return jid.User // all lookups failed, fall back to raw (likely still a LID digit string)
 }
 
 func normalizePhoneNumber(value string) string {
@@ -609,6 +770,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileSHA256,
 		fileEncSHA256,
 		fileLength,
+		senderNumber,
 	)
 
 	if err != nil {
@@ -643,7 +805,6 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}(msg.Info.ID, chatJID)
 	}
 
-	fmt.Println("----------------------------------------------------------------------------------------------------------------")
 }
 
 // DownloadMediaRequest represents the request body for the download media API
@@ -738,7 +899,19 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	var err error
 
 	// First, check if we already have this file
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+	// Prefer the sender's phone number as the folder name; fall back to chat_jid
+	// (e.g. for rows stored before the phone_number column existed).
+	var folderPhoneNumber string
+	_ = messageStore.db.QueryRow(
+		"SELECT phone_number FROM messages WHERE id = ? AND chat_jid = ?",
+		messageID, chatJID,
+	).Scan(&folderPhoneNumber)
+
+	folderName := folderPhoneNumber
+	if folderName == "" {
+		folderName = strings.ReplaceAll(chatJID, ":", "_")
+	}
+	chatDir := fmt.Sprintf("store/%s", folderName)
 	localPath := ""
 
 	// Get media info from the database
@@ -829,7 +1002,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+func startRESTServer(box *ClientBox, container *sqlstore.Container, registerHandlers func(*whatsmeow.Client), messageStore *MessageStore, port int, logger waLog.Logger) {
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -859,7 +1032,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(box.Get(), req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -898,7 +1071,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Download the media
-		success, mediaType, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID)
+		success, mediaType, filename, path, err := downloadMedia(box.Get(), messageStore, req.MessageID, req.ChatJID)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -927,6 +1100,65 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		loginMu.Lock()
+		connected := waConnected && box.Get().IsConnected()
+		loginMu.Unlock()
+		json.NewEncoder(w).Encode(map[string]bool{"connected": connected})
+	})
+
+	http.HandleFunc("/api/qr", func(w http.ResponseWriter, r *http.Request) {
+		loginMu.Lock()
+		qr := latestQRCode
+		loginMu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"qr": qr})
+	})
+
+	http.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
+		cur := box.Get()
+
+		loginMu.Lock()
+		invalid := deviceInvalid
+		loginMu.Unlock()
+
+		if cur.IsConnected() && cur.Store.ID != nil && !invalid {
+			json.NewEncoder(w).Encode(map[string]string{"message": "already connected"})
+			return
+		}
+
+		if cur.Store.ID != nil || invalid {
+			// Either a stale-but-still-paired session, or one whatsmeow already
+			// tore down internally (device removed from the phone — this also
+			// resets Store.ID to nil, so ID==nil alone doesn't mean "safe to
+			// reuse"). Either way this client object is done; build a fresh one.
+			if cur.IsConnected() {
+				cur.Disconnect()
+			}
+			if cur.Store.ID != nil {
+				if err := cur.Store.Delete(context.Background()); err != nil {
+					logger.Warnf("[api/login] failed to delete stale device: %v", err)
+				}
+			}
+
+			newClient, err := newWAClient(container, logger)
+			if err != nil {
+				logger.Errorf("[api/login] failed to create new client: %v", err)
+				http.Error(w, "failed to start login", http.StatusInternalServerError)
+				return
+			}
+			registerHandlers(newClient)
+			box.Set(newClient)
+			cur = newClient
+
+			loginMu.Lock()
+			deviceInvalid = false
+			loginMu.Unlock()
+		}
+
+		go startQRLogin(cur, logger)
+		json.NewEncoder(w).Encode(map[string]string{"message": "login started"})
+	})
+
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
@@ -937,6 +1169,49 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
+}
+
+// ClientBox holds the active whatsmeow client behind a lock so it can be
+// swapped out at runtime — needed because a whatsmeow.Client whose Store has
+// been deleted is permanently unusable ("invalid use of deleted device"), so
+// relogin after a stale/logged-out session must build a fresh client rather
+// than reuse the old one.
+type ClientBox struct {
+	mu     sync.RWMutex
+	client *whatsmeow.Client
+}
+
+func (b *ClientBox) Get() *whatsmeow.Client {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.client
+}
+
+func (b *ClientBox) Set(c *whatsmeow.Client) {
+	b.mu.Lock()
+	b.client = c
+	b.mu.Unlock()
+}
+
+// newWAClient creates a fresh whatsmeow client backed by either the existing
+// stored device or a brand new one. Used both at startup and whenever a
+// relogin needs to replace a client whose device was deleted.
+func newWAClient(container *sqlstore.Container, logger waLog.Logger) (*whatsmeow.Client, error) {
+	deviceStore, err := container.GetFirstDevice(context.Background())
+	if err != nil {
+		if err == sql.ErrNoRows {
+			deviceStore = container.NewDevice()
+			logger.Infof("Created new device")
+		} else {
+			return nil, fmt.Errorf("failed to get device: %v", err)
+		}
+	}
+
+	client := whatsmeow.NewClient(deviceStore, logger)
+	if client == nil {
+		return nil, fmt.Errorf("failed to create WhatsApp client")
+	}
+	return client, nil
 }
 
 func main() {
@@ -959,25 +1234,15 @@ func main() {
 		return
 	}
 
-	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice(context.Background())
-	if err != nil {
-		if err == sql.ErrNoRows {
-			// No device exists, create one
-			deviceStore = container.NewDevice()
-			logger.Infof("Created new device")
-		} else {
-			logger.Errorf("Failed to get device: %v", err)
-			return
-		}
-	}
-
 	// Create client instance
-	client := whatsmeow.NewClient(deviceStore, logger)
-	if client == nil {
-		logger.Errorf("Failed to create WhatsApp client")
+	client, err := newWAClient(container, logger)
+	if err != nil {
+		logger.Errorf("%v", err)
 		return
 	}
+
+	box := &ClientBox{}
+	box.Set(client)
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()
@@ -987,79 +1252,53 @@ func main() {
 	}
 	defer messageStore.Close()
 
-	// Setup event handling for messages and history sync
-	client.AddEventHandler(func(evt interface{}) {
-		switch v := evt.(type) {
-		case *events.Message:
-			// Process regular messages
-			handleMessage(client, messageStore, v, logger)
+	// Setup event handling for messages and history sync. Always look up the
+	// *current* client via box.Get() rather than closing over the client
+	// variable directly, since relogin may swap it out.
+	registerHandlers := func(c *whatsmeow.Client) {
+		c.AddEventHandler(func(evt interface{}) {
+			switch v := evt.(type) {
+			case *events.Message:
+				// Process regular messages
+				handleMessage(box.Get(), messageStore, v, logger)
 
-		case *events.HistorySync:
-			// Process history sync events
-			handleHistorySync(client, messageStore, v, logger)
+			case *events.HistorySync:
+				// Process history sync events
+				handleHistorySync(box.Get(), messageStore, v, logger)
 
-		case *events.Connected:
-			logger.Infof("Connected to WhatsApp")
+			case *events.Connected:
+				logger.Infof("Connected to WhatsApp")
 
-		case *events.LoggedOut:
-			logger.Warnf("Device logged out, please scan QR code to log in again")
-		}
-	})
+			case *events.LoggedOut:
+				logger.Warnf("Device logged out, please scan QR code to log in again")
+				loginMu.Lock()
+				waConnected = false
+				deviceInvalid = true
+				loginMu.Unlock()
+			}
+		})
+	}
+	registerHandlers(client)
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
+	// Start REST API server first so /api/login and /api/qr work even before login
+	startRESTServer(box, container, registerHandlers, messageStore, 8080, logger)
 
 	// Connect to WhatsApp
 	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			logger.Errorf("Failed to connect: %v", err)
-			return
-		}
-
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			} else if evt.Event == "success" {
-				connected <- true
-				break
-			}
-		}
-
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
-		}
+		// No ID stored — wait for someone to trigger login via the dashboard
+		fmt.Println("Not logged in. Waiting for QR login to be triggered via /api/login...")
 	} else {
 		// Already logged in, just connect
-		err = client.Connect()
-		if err != nil {
+		if err := client.Connect(); err != nil {
 			logger.Errorf("Failed to connect: %v", err)
 			return
 		}
-		connected <- true
+		waConnected = true
+		time.Sleep(2 * time.Second)
+		if client.IsConnected() {
+			fmt.Println("\n✓ Connected to WhatsApp!")
+		}
 	}
-
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
-
-	if !client.IsConnected() {
-		logger.Errorf("Failed to establish stable connection")
-		return
-	}
-
-	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
-
-	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
@@ -1072,7 +1311,7 @@ func main() {
 
 	fmt.Println("Disconnecting...")
 	// Disconnect client
-	client.Disconnect()
+	box.Get().Disconnect()
 }
 
 // GetChatName determines the appropriate name for a chat based on JID and other info
@@ -1251,6 +1490,13 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					sender = jid.User
 				}
 
+				senderNumber := sender
+				if isFromMe && client.Store.ID != nil {
+					senderNumber = client.Store.ID.User
+				} else if !isFromMe {
+					senderNumber = resolvePhoneNumberFromJIDString(client, sender, jid, logger)
+				}
+
 				// Store message
 				msgID := ""
 				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
@@ -1280,6 +1526,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					fileSHA256,
 					fileEncSHA256,
 					fileLength,
+					senderNumber,
 				)
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)
