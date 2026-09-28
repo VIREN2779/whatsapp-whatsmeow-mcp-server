@@ -22,7 +22,7 @@ services:
       - MESSAGES_DB_PATH=/app/store/messages.db
       - EXPORT_ROOT=/app/export
       - DOWNLOADS_DIR=/app/downloads
-      - DOWNLOADS_HOST_DIR=C:/Users/User/whatsapp-doc-approval/data
+      - DOWNLOADS_HOST_DIR=G:/My Drive/OCR In - Ketul/downloaded-images
     depends_on:
       - whatsapp-bridge
     restart: unless-stopped
