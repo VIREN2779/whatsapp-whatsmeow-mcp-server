@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   whatsapp-bridge:
     build: ./whatsapp-bridge
@@ -15,8 +14,7 @@ services:
     volumes:
       - bridge-store:/app/store:ro
       - dashboard-data:/app/data
-      - 'G:/My Drive/OCR In - Ketul:/app/export'
-      - 'G:/My Drive/OCR In - Ketul/downloaded-images:/app/downloads'
+      - './data:/app/downloads'
     environment:
       - BRIDGE_URL=http://whatsapp-bridge:8080
       - STATUS_FILE=/app/data/status.json
@@ -24,6 +22,7 @@ services:
       - MESSAGES_DB_PATH=/app/store/messages.db
       - EXPORT_ROOT=/app/export
       - DOWNLOADS_DIR=/app/downloads
+      - DOWNLOADS_HOST_DIR=C:/Users/User/whatsapp-doc-approval/data
     depends_on:
       - whatsapp-bridge
     restart: unless-stopped
