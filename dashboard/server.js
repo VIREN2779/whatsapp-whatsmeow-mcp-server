@@ -17,6 +17,8 @@ const EXPORT_ROOT = process.env.EXPORT_ROOT || './export';
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(os.homedir(), 'Downloads', 'downloaded-images');
 // Host-visible path for API responses only; file operations use DOWNLOADS_DIR.
 const DOWNLOADS_HOST_DIR = process.env.DOWNLOADS_HOST_DIR || '';
+const ALLOWED_IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
+const ALLOWED_DOCUMENT_EXTENSIONS = ['.docx', '.pdf', '.txt', '.xlsx'];
 
 // Open messages.db READ-ONLY — never write to the bridge's own database
 const db = new DatabaseSync(MESSAGES_DB_PATH, { readOnly: true });
@@ -136,12 +138,25 @@ function upsertRule(rules, phone_number, name, timestamp) {
 
 const app = new Hono();
 
+function filenameExtensionCondition(column, extensions) {
+    return extensions.map(extension => `LOWER(${column}) LIKE '%${extension}'`).join(' OR ');
+}
+function allowedMediaCondition(alias = '') {
+    const column = (name) => alias ? `${alias}.${name}` : name;
+    const imageExtensions = filenameExtensionCondition(column('filename'), ALLOWED_IMAGE_EXTENSIONS);
+    const documentExtensions = filenameExtensionCondition(column('filename'), ALLOWED_DOCUMENT_EXTENSIONS);
+
+    return `(
+        (${column('media_type')} = 'image' AND (${imageExtensions}))
+        OR (${column('media_type')} = 'document' AND (${documentExtensions}))
+    )`;
+}
+
 function getMediaMessages() {
     return db.prepare(`
     SELECT id, chat_jid, phone_number, filename, media_type, timestamp
     FROM messages
-    WHERE media_type IN ('image', 'document')
-      AND filename != ''
+    WHERE ${allowedMediaCondition()}
       AND is_from_me = 0
     ORDER BY timestamp DESC
   `).all();
@@ -422,7 +437,9 @@ app.get('/api/media/download', async (c) => {
                    COALESCE(c.name, '') AS user_name
             FROM messages m
             LEFT JOIN chats c ON c.jid = m.chat_jid
-            WHERE m.filename = ? LIMIT 1
+            WHERE m.filename = ?
+              AND ${allowedMediaCondition('m')}
+            LIMIT 1
         `).get(filename);
 
         if (!message) return c.json({ success: false, message: 'No media found with that filename' }, 404);
@@ -444,8 +461,7 @@ app.get('/api/media/download', async (c) => {
         const limitClause = limit ? 'LIMIT ?' : '';
         const where = [
             'phone_number = ?',
-            "media_type IN ('image', 'document')",
-            "filename != ''"
+            allowedMediaCondition()
         ];
         const params = [phone_number];
 
