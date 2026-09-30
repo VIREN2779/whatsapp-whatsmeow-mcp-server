@@ -9,6 +9,59 @@ function Write-TransferLog {
     Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
 }
 
+function ConvertTo-GoogleDriveName {
+    param(
+        [string]$Name,
+        [switch]$PreserveExtension
+    )
+
+    $safeName = $Name.Normalize([System.Text.NormalizationForm]::FormC)
+    $safeName = $safeName.Replace([string][char]0xFFFD, '_')
+    $safeName = [System.Text.RegularExpressions.Regex]::Replace(
+        $safeName,
+        '[\p{Cc}\p{Cf}\p{Cs}]',
+        '_'
+    )
+
+    foreach ($invalidCharacter in [System.IO.Path]::GetInvalidFileNameChars()) {
+        $safeName = $safeName.Replace([string]$invalidCharacter, '_')
+    }
+
+    $safeName = $safeName.Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        return '_'
+    }
+
+    if ($safeName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$') {
+        $safeName = "_$safeName"
+    }
+
+    $maximumLength = 120
+    if ($safeName.Length -gt $maximumLength) {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($Name)
+            $hash = [System.BitConverter]::ToString($sha256.ComputeHash($nameBytes)).Replace('-', '').Substring(0, 8).ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+
+        $extension = ''
+        if ($PreserveExtension) {
+            $candidateExtension = [System.IO.Path]::GetExtension($safeName)
+            if ($candidateExtension.Length -le 20) {
+                $extension = $candidateExtension
+            }
+        }
+
+        $stemLength = $maximumLength - $extension.Length - $hash.Length - 1
+        $safeName = $safeName.Substring(0, $stemLength).TrimEnd() + "-$hash$extension"
+    }
+
+    return $safeName
+}
+
 $mutex = New-Object System.Threading.Mutex($false, 'Local\GoogleDriveAutoCutPasteMedia')
 if (!$mutex.WaitOne(0)) {
     exit 0
@@ -34,7 +87,18 @@ try {
             $sourceFile = $_.FullName
             $sourceLength = $_.Length
             $relative = $sourceFile.Substring($source.Length).TrimStart('\')
-            $target = Join-Path $destination $relative
+            $segments = @($relative -split '\')
+            $safeSegments = for ($segmentIndex = 0; $segmentIndex -lt $segments.Count; $segmentIndex++) {
+                ConvertTo-GoogleDriveName `
+                    -Name $segments[$segmentIndex] `
+                    -PreserveExtension:($segmentIndex -eq $segments.Count - 1)
+            }
+            $safeRelative = [string]::Join('\', $safeSegments)
+            $target = Join-Path $destination $safeRelative
+
+            if ($safeRelative -cne $relative) {
+                Write-TransferLog "Sanitized Drive path: '$relative' -> '$safeRelative'"
+            }
 
             try {
                 New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) |
