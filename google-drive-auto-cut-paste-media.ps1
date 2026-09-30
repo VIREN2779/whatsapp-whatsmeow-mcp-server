@@ -87,7 +87,10 @@ try {
             $sourceFile = $_.FullName
             $sourceLength = $_.Length
             $relative = $sourceFile.Substring($source.Length).TrimStart('\')
-            $segments = @($relative -split '\')
+            $segments = @($relative.Split(
+                    [char[]]@([System.IO.Path]::DirectorySeparatorChar),
+                    [System.StringSplitOptions]::RemoveEmptyEntries
+                ))
             $safeSegments = for ($segmentIndex = 0; $segmentIndex -lt $segments.Count; $segmentIndex++) {
                 ConvertTo-GoogleDriveName `
                     -Name $segments[$segmentIndex] `
@@ -101,6 +104,12 @@ try {
             }
 
             try {
+                if ((Test-Path -LiteralPath $target -PathType Leaf) -and
+                    (Get-Item -LiteralPath $target).Length -eq $sourceLength) {
+                    Write-TransferLog "Skipped unchanged: '$sourceFile' -> '$target'"
+                    return
+                }
+
                 New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) |
                     Out-Null
 
@@ -133,8 +142,7 @@ try {
                     throw "Copied file size does not match the source file."
                 }
 
-                Remove-Item -LiteralPath $sourceFile -Force
-                Write-TransferLog "Moved: '$sourceFile' -> '$target'"
+                Write-TransferLog "Copied: '$sourceFile' -> '$target'"
             }
             catch {
                 $transferFailed = $true
@@ -146,15 +154,6 @@ try {
     if ($transferFailed) {
         throw "One or more files failed. See '$logPath'."
     }
-
-    Get-ChildItem -LiteralPath $source -Directory -Recurse |
-        Sort-Object { $_.FullName.Length } -Descending |
-        ForEach-Object {
-            if (!(Get-ChildItem -LiteralPath $_.FullName -Force |
-                    Select-Object -First 1)) {
-                Remove-Item -LiteralPath $_.FullName
-            }
-        }
 }
 catch {
     Write-TransferLog "FATAL: $($_.Exception.Message)"
